@@ -1,0 +1,29 @@
+{
+  "quantization_scale": 256,
+  "layers": [
+    {
+      "name": "dense",
+      "input_size": 784,
+      "output_size": 128,
+      "activation": "relu",
+      "weights": "weights1.hex",
+      "biases": "biases1.hex"
+    },
+    {
+      "name": "dense_1",
+      "input_size": 128,
+      "output_size": 128,
+      "activation": "relu",
+      "weights": "weights2.hex",
+      "biases": "biases2.hex"
+    },
+    {
+      "name": "dense_2",
+      "input_size": 128,
+      "output_size": 10,
+      "activation": "softmax",
+      "weights": "weights3.hex",
+      "biases": "biases3.hex"
+    }
+  ]
+}
