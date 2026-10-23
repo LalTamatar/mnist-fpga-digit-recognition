@@ -1,0 +1,266 @@
+module mnist_top #(
+    parameter INPUT_FILE = "C:/Users/LENOVO/OneDrive/Desktop/input_image.hex"
+)(
+    input wire clk,
+    input wire rst,
+    input wire start,
+    output reg busy,
+    output reg done,
+    output reg [3:0] predicted_digit
+);
+
+    // Input image and intermediate activation memories
+    reg signed [15:0] image_mem [0:783];
+    reg signed [15:0] layer1_mem [0:127];
+    reg signed [15:0] layer2_mem [0:127];
+    reg signed [15:0] scores_mem [0:9];
+
+    // Controller states
+    localparam IDLE     = 4'd0;
+    localparam START_L1 = 4'd1;
+    localparam FEED_L1  = 4'd2;
+    localparam WAIT_L1  = 4'd3;
+    localparam START_L2 = 4'd4;
+    localparam FEED_L2  = 4'd5;
+    localparam WAIT_L2  = 4'd6;
+    localparam START_L3 = 4'd7;
+    localparam FEED_L3  = 4'd8;
+    localparam WAIT_L3  = 4'd9;
+    localparam ARGMAX   = 4'd10;
+
+    reg [3:0] state;
+    integer input_idx;
+    integer i;
+    integer best_index;
+    reg signed [15:0] best_score;
+
+    // Layer 1 signals
+    reg l1_start;
+    reg signed [15:0] l1_input_data;
+    reg l1_input_valid;
+    wire l1_busy, l1_done, l1_output_valid;
+    wire [15:0] l1_output_addr;
+    wire signed [15:0] l1_output_data;
+
+    // Layer 2 signals
+    reg l2_start;
+    reg signed [15:0] l2_input_data;
+    reg l2_input_valid;
+    wire l2_busy, l2_done, l2_output_valid;
+    wire [15:0] l2_output_addr;
+    wire signed [15:0] l2_output_data;
+
+    // Layer 3 signals
+    reg l3_start;
+    reg signed [15:0] l3_input_data;
+    reg l3_input_valid;
+    wire l3_busy, l3_done, l3_output_valid;
+    wire [15:0] l3_output_addr;
+    wire signed [15:0] l3_output_data;
+
+    // Read the real image.
+    initial begin
+        $readmemh(INPUT_FILE, image_mem);
+    end
+
+    // Three real trained Dense layers
+    dense_layer #(
+        .INPUT_SIZE(784),
+        .OUTPUT_SIZE(128),
+        .WEIGHT_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\weights1.hex"),
+        .BIAS_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\biases1.hex"),
+        .APPLY_RELU(1)
+    ) layer1 (
+        .clk(clk), .rst(rst), .start(l1_start),
+        .input_data(l1_input_data),
+        .input_valid(l1_input_valid),
+        .busy(l1_busy), .done(l1_done),
+        .output_addr(l1_output_addr),
+        .output_data(l1_output_data),
+        .output_valid(l1_output_valid)
+    );
+
+    dense_layer #(
+        .INPUT_SIZE(128),
+        .OUTPUT_SIZE(128),
+        .WEIGHT_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\weights2.hex"),
+        .BIAS_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\biases2.hex"),
+        .APPLY_RELU(1)
+    ) layer2 (
+        .clk(clk), .rst(rst), .start(l2_start),
+        .input_data(l2_input_data),
+        .input_valid(l2_input_valid),
+        .busy(l2_busy), .done(l2_done),
+        .output_addr(l2_output_addr),
+        .output_data(l2_output_data),
+        .output_valid(l2_output_valid)
+    );
+    
+    dense_layer #(
+        .INPUT_SIZE(128),
+        .OUTPUT_SIZE(10),
+        .WEIGHT_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\weights3.hex"),
+        .BIAS_FILE("C:\\Users\\LENOVO\\Downloads\\mnist_fpga_files\\biases3.hex"),
+        .APPLY_RELU(0)
+    ) layer3 (
+        .clk(clk), .rst(rst), .start(l3_start),
+        .input_data(l3_input_data),
+        .input_valid(l3_input_valid),
+        .busy(l3_busy), .done(l3_done),
+        .output_addr(l3_output_addr),
+        .output_data(l3_output_data),
+        .output_valid(l3_output_valid)
+    );
+
+    // Feed each layer's input vector in order.
+    always @* begin
+        l1_start = (state == START_L1);
+        l2_start = (state == START_L2);
+        l3_start = (state == START_L3);
+
+        l1_input_valid = (state == FEED_L1);
+        l2_input_valid = (state == FEED_L2);
+        l3_input_valid = (state == FEED_L3);
+
+        l1_input_data = 0;
+        l2_input_data = 0;
+        l3_input_data = 0;
+
+        if (state == FEED_L1 && input_idx < 784)
+            l1_input_data = image_mem[input_idx];
+
+        if (state == FEED_L2 && input_idx < 128)
+            l2_input_data = layer1_mem[input_idx];
+
+        if (state == FEED_L3 && input_idx < 128)
+            l3_input_data = layer2_mem[input_idx];
+    end
+
+    // Top-level controller
+    always @(posedge clk) begin
+        if (rst) begin
+            state <= IDLE;
+            busy <= 0;
+            done <= 0;
+            predicted_digit <= 0;
+            input_idx <= 0;
+            best_index <= 0;
+            best_score <= -32768;
+        end else begin
+            // Removed default "done <= 0;" here so "done" latches high until clear
+
+            // Save each layer's results as they arrive.
+            if (l1_output_valid)
+                layer1_mem[l1_output_addr] <= l1_output_data;
+
+            if (l2_output_valid)
+                layer2_mem[l2_output_addr] <= l2_output_data;
+
+            if (l3_output_valid)
+                scores_mem[l3_output_addr] <= l3_output_data;
+
+            case (state)
+                IDLE: begin
+                    busy <= 0;
+                    if (start) begin
+                        busy <= 1;
+                        done <= 0; // Clears the done flag on a new run
+                        input_idx <= 0;
+                        state <= START_L1;
+                    end
+                end
+
+                START_L1: begin
+                    input_idx <= 0;
+                    state <= FEED_L1;
+                end
+
+                FEED_L1: begin
+                    if (input_idx == 783) begin
+                        state <= WAIT_L1;
+                    end else begin
+                        input_idx <= input_idx + 1;
+                    end
+                end
+
+                WAIT_L1: begin
+                    if (l1_done) begin
+                        input_idx <= 0;
+                        state <= START_L2;
+                    end
+                end
+
+                START_L2: begin
+                    input_idx <= 0;
+                    state <= FEED_L2;
+                end
+
+                FEED_L2: begin
+                    if (input_idx == 127) begin
+                        state <= WAIT_L2;
+                    end else begin
+                        input_idx <= input_idx + 1;
+                    end
+                end
+
+                WAIT_L2: begin
+                    if (l2_done) begin
+                        input_idx <= 0;
+                        state <= START_L3;
+                    end
+                end
+
+                START_L3: begin
+                    input_idx <= 0;
+                    state <= FEED_L3;
+                end
+
+                FEED_L3: begin
+                    if (input_idx == 127) begin
+                        state <= WAIT_L3;
+                    end else begin
+                        input_idx <= input_idx + 1;
+                    end
+                end
+
+                WAIT_L3: begin
+                    if (l3_done) begin
+                        best_index <= 0;
+                        best_score <= scores_mem[0];
+                        i <= 1;
+                        state <= ARGMAX;
+                    end
+                end
+
+                ARGMAX: begin
+                    if ($signed(scores_mem[i]) >
+                        $signed(best_score)) begin
+                        best_score <= scores_mem[i];
+                        best_index <= i;
+                    end
+
+                    if (i == 9) begin
+                        // Include score 9 in the final comparison.
+                        if ($signed(scores_mem[9]) >
+                            $signed(best_score))
+                            predicted_digit <= 4'd9;
+                        else
+                            predicted_digit <= best_index;
+
+                        busy <= 0;
+                        done <= 1; // Latches high and stays lit
+                        state <= IDLE;
+                    end else begin
+                        i <= i + 1;
+                    end
+                end
+
+                default: begin
+                    state <= IDLE;
+                    busy <= 0;
+                end
+            endcase
+        end
+    end
+
+endmodule
