@@ -1,0 +1,143 @@
+
+module dense_layer #(
+    parameter INPUT_SIZE  = 784,
+    parameter OUTPUT_SIZE = 128,
+    parameter WEIGHT_FILE = "weights1.hex",
+    parameter BIAS_FILE   = "biases1.hex",
+    parameter APPLY_RELU  = 1
+)(
+    input wire clk,
+    input wire rst,
+    input wire start,
+    input wire signed [15:0] input_data,
+    input wire input_valid,
+    output reg busy,
+    output reg done,
+    output reg [15:0] output_addr,
+    output reg signed [15:0] output_data,
+    output reg output_valid
+);
+
+    reg signed [15:0] input_mem [0:INPUT_SIZE-1];
+    reg signed [15:0] weights [0:INPUT_SIZE*OUTPUT_SIZE-1];
+    reg signed [15:0] biases [0:OUTPUT_SIZE-1];
+
+    localparam IDLE       = 2'd0;
+    localparam LOAD_INPUT = 2'd1;
+    localparam INIT_MAC   = 2'd2;
+    localparam RUN_MAC    = 2'd3;
+
+    reg [1:0] state;
+    integer input_count;
+    integer input_idx;
+    integer output_idx;
+
+    reg signed [39:0] acc;
+    reg signed [31:0] product;
+    reg signed [39:0] product_ext;
+    reg signed [39:0] acc_next;
+    reg signed [39:0] result_q8;
+
+    initial begin
+        $readmemh(WEIGHT_FILE, weights);
+        $readmemh(BIAS_FILE, biases);
+    end
+
+    always @* begin
+        product = input_mem[input_idx] *
+                  weights[input_idx * OUTPUT_SIZE + output_idx];
+
+        product_ext = {{8{product[31]}}, product};
+        acc_next = acc + product_ext;
+        result_q8 = acc_next >>> 8;
+    end
+
+    always @(posedge clk) begin
+        if (rst) begin
+            state        <= IDLE;
+            busy         <= 0;
+            done         <= 0;
+            output_addr  <= 0;
+            output_data  <= 0;
+            output_valid <= 0;
+            input_count  <= 0;
+            input_idx    <= 0;
+            output_idx   <= 0;
+            acc          <= 0;
+        end else begin
+            done         <= 0;
+            output_valid <= 0;
+
+            case (state)
+                IDLE: begin
+                    busy <= 0;
+                    if (start) begin
+                        busy        <= 1;
+                        input_count <= 0;
+                        output_idx  <= 0;
+                        state       <= LOAD_INPUT;
+                    end
+                end
+
+                LOAD_INPUT: begin
+                    if (input_valid) begin
+                        input_mem[input_count] <= input_data;
+
+                        if (input_count == INPUT_SIZE-1) begin
+                            input_idx  <= 0;
+                            output_idx <= 0;
+                            state      <= INIT_MAC;
+                        end else begin
+                            input_count <= input_count + 1;
+                        end
+                    end
+                end
+
+                INIT_MAC: begin
+                    // Bias is Q8; shift left 8 to match Q16 products.
+                    acc <= {{16{biases[output_idx][15]}},
+                            biases[output_idx], 8'b0};
+                    input_idx <= 0;
+                    state <= RUN_MAC;
+                end
+
+                RUN_MAC: begin
+                    if (input_idx == INPUT_SIZE-1) begin
+                        // Use acc_next so the final product is included.
+                        if (APPLY_RELU != 0 && acc_next < 0) begin
+                            output_data <= 16'sd0;
+                        end else if (result_q8 > 32767) begin
+                            output_data <= 16'sh7fff;
+                        end else if (result_q8 < -32768) begin
+                            output_data <= 16'sh8000;
+                        end else begin
+                            output_data <= result_q8[15:0];
+                        end
+
+                        output_addr  <= output_idx;
+                        output_valid <= 1;
+                        acc <= acc_next;
+
+                        if (output_idx == OUTPUT_SIZE-1) begin
+                            busy  <= 0;
+                            done  <= 1;
+                            state <= IDLE;
+                        end else begin
+                            output_idx <= output_idx + 1;
+                            state <= INIT_MAC;
+                        end
+                    end else begin
+                        acc <= acc_next;
+                        input_idx <= input_idx + 1;
+                    end
+                end
+
+                default: begin
+                    state <= IDLE;
+                    busy <= 0;
+                end
+            endcase
+        end
+    end
+
+endmodule
